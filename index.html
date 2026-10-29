@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="theme-color" content="#1a1a1a"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<title>圍棋 · 人機對戰</title>
+<style>
+  :root { --bg:#1a1a1a; --text:#f0e6d8; --muted:#a89880; --panel:#242424; --accent:#166534; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body {
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Noto Sans TC",sans-serif;
+    display:flex; flex-direction:column; align-items:center; min-height:100dvh;
+    padding:8px; padding-bottom:max(14px,env(safe-area-inset-bottom));
+  }
+  h1 { font-size:1.05rem; font-weight:600; margin:4px 0 8px; text-align:center; letter-spacing:0.04em; }
+  #wrap { width:min(100vw - 16px, 560px); }
+  canvas { width:100%; height:auto; display:block; border-radius:8px; box-shadow:0 4px 24px #0008; touch-action:none; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top:10px; align-items:center; }
+  label.ctl {
+    display:flex; align-items:center; gap:6px; background:var(--panel);
+    border-radius:10px; padding:8px 12px; font-size:0.85rem; color:var(--muted);
+  }
+  button, select {
+    appearance:none; border:0; border-radius:10px; padding:10px 14px;
+    font-size:0.9rem; background:#2a2a2a; color:var(--text); cursor:pointer;
+  }
+  select { background:#333; padding:8px 10px; }
+  button.primary { background:var(--accent); color:#fff; font-weight:600; }
+  button:disabled { opacity:0.4; cursor:default; }
+  #lastMoveBox {
+    margin-top:10px; text-align:center; background:var(--panel);
+    border-radius:12px; padding:10px 14px; width:min(100vw - 16px, 560px);
+  }
+  #lastMoveLabel { font-size:0.75rem; color:var(--muted); margin-bottom:2px; }
+  #lastMoveBig {
+    font-size:clamp(1.6rem, 7vw, 2.4rem); font-weight:700; letter-spacing:0.06em;
+    font-variant-numeric:tabular-nums; line-height:1.2;
+  }
+  #lastMoveBig.black { color:#e8e8e8; }
+  #lastMoveBig.white { color:#fbbf24; }
+  #status {
+    text-align:center; margin-top:8px; font-size:0.86rem; min-height:2.6em;
+    line-height:1.4; padding:0 8px; color:var(--text); white-space:pre-line;
+  }
+  .hint {
+    font-size:0.72rem; opacity:0.6; text-align:center; margin-top:8px;
+    line-height:1.45; max-width:36rem; color:var(--muted);
+  }
+  .tag {
+    display:inline-block; padding:2px 8px; border-radius:999px;
+    font-size:0.75rem; margin:0 2px; background:#1e3a5f;
+  }
+  .thinking { color:#fbbf24; }
+</style>
+</head>
+<body>
+  <h1>圍棋 · 人機對戰 <span class="tag">19路</span></h1>
+  <div id="wrap"><canvas id="board" width="760" height="760"></canvas></div>
+
+  <div id="lastMoveBox">
+    <div id="lastMoveLabel">上一手（同步到 App）</div>
+    <div id="lastMoveBig">—</div>
+  </div>
+
+  <div id="status">選擇執子與強度後按「新局」。你執黑先下。</div>
+
+  <div class="bar">
+    <label class="ctl">我執
+      <select id="myColor">
+        <option value="1" selected>黑</option>
+        <option value="2">白</option>
+      </select>
+    </label>
+    <label class="ctl">AI 強度
+      <select id="aiLevel">
+        <option value="1">弱</option>
+        <option value="2">中</option>
+        <option value="3" selected>強</option>
+        <option value="4">超強</option>
+      </select>
+    </label>
+  </div>
+  <div class="bar">
+    <button id="new" class="primary">新局</button>
+    <button id="undo">悔棋</button>
+    <button id="pass">停一手</button>
+    <button id="forceAI">讓 AI 下</button>
+  </div>
+  <p class="hint">你按棋盤落子＝同步 App 嘅一手；AI 落子後把座標轉到 App。悔棋方便改錯。座標略過字母 I（A–H, J–T）。</p>
+
+<script>
+(() => {
+const SIZE=19, EMPTY=0, BLACK=1, WHITE=2;
+const LETTERS='ABCDEFGHJKLMNOPQRST';
+const canvas=document.getElementById('board');
+const ctx=canvas.getContext('2d');
+const statusEl=document.getElementById('status');
+const lastMoveBig=document.getElementById('lastMoveBig');
+const lastMoveLabel=document.getElementById('lastMoveLabel');
+
+const BOOKS = [
+  { name:'星·小飛掛·一間跳', moves:['Q16','D4','C16','Q3','E16','R5','C14','R3','D17','C3','F17','D5','C10'] },
+  { name:'星·小飛掛·二間跳', moves:['Q16','D4','C16','Q3','E16','R5','C13','R3','D17','C3','F17','D5'] },
+  { name:'星·一間高掛', moves:['Q16','D4','C16','Q3','D16','R5','C14','R3','D17','C6','F17'] },
+  { name:'三三侵分', moves:['Q16','D4','R14','Q3','C16','R5','D17','C6','C14','F3','E16','D2'] },
+  { name:'對角星佈陣', moves:['Q16','D4','C16','Q3','E3','R5','C4','R14','D17','O17','C10','R16'] },
+  { name:'中國流意味', moves:['Q16','D4','R14','Q3','C16','R5','C14','O3','D10','C6','F16','D2'] },
+  { name:'無憂角定石', moves:['Q16','D4','R14','Q3','R12','R5','R10','O17','Q10','R17','O16','R15'] },
+  { name:'小目·一間高夾', moves:['R16','D4','Q16','Q3','R14','C6','O17','R5','Q10','C3'] },
+  { name:'小目·二間高夾', moves:['R16','D4','Q16','Q3','R14','C6','N17','R5','Q10','D2'] },
+  { name:'小目·星掛', moves:['R16','D4','C16','Q3','Q17','R5','R14','O3','C14','C6'] },
+  { name:'雙方小目對角', moves:['R16','D3','C16','R3','Q14','C5','O17','R5','C10','Q17'] },
+  { name:'雙星錯小目', moves:['Q16','D3','C16','Q4','E3','R5','C4','R14','D17','O17'] },
+  { name:'星·大飛掛', moves:['Q16','D4','C16','Q3','F17','R5','C14','R3','D17','C3','E16','D5'] },
+  { name:'點三三後跳出', moves:['Q16','D4','R14','Q3','R17','R5','Q17','O3','C16','C6'] },
+  { name:'高中國流', moves:['Q16','D4','R14','Q3','C16','R5','D14','O3','C10','C6','F17','D2'] },
+  { name:'迷你中國流', moves:['Q16','D4','R14','Q3','C16','R5','C13','O3','D10','C6'] },
+  { name:'小林流意味', moves:['R16','D4','Q14','Q3','R12','R5','R9','O17','C16','C6'] },
+  { name:'雙三三開局', moves:['R17','D3','C17','R3','Q15','C5','O16','R5','C10','Q17'] },
+  { name:'星小目對角', moves:['Q16','D3','C16','R3','E3','R5','C4','Q17','D17','O17'] },
+  { name:'互掛星位', moves:['Q16','D4','C4','Q3','E16','R5','C16','R14','D17','O17','C10','R16'] }
+];
+
+let grid, ko, captures, lastMove, lastWasPass, toPlay, passes, moveCount;
+let humanColor = BLACK;
+let aiThinking = false;
+let gameOver = false;
+let history = [];
+let playedCoords = [];
+let lastNote = '';
+let aiTimer = null;
+
+function parseCoord(s){
+  s = String(s).toUpperCase();
+  const x = LETTERS.indexOf(s[0]);
+  const n = parseInt(s.slice(1), 10);
+  if (x < 0 || !n || n < 1 || n > SIZE) return null;
+  return [x, SIZE - n];
+}
+function coord(x, y){ return LETTERS[x] + (SIZE - y); }
+function colorName(c){ return c === BLACK ? '黑' : '白'; }
+function opp(c){ return c === BLACK ? WHITE : BLACK; }
+function inb(x,y){ return x>=0 && y>=0 && x<SIZE && y<SIZE; }
+function neigh(x,y){
+  const o=[];
+  if(inb(x+1,y)) o.push([x+1,y]);
+  if(inb(x-1,y)) o.push([x-1,y]);
+  if(inb(x,y+1)) o.push([x,y+1]);
+  if(inb(x,y-1)) o.push([x,y-1]);
+  return o;
+}
+function group(x,y,g=grid){
+  const c=g[y][x];
+  if(c===EMPTY) return new Set();
+  const seen=new Set([x+','+y]), st=[[x,y]];
+  while(st.length){
+    const [cx,cy]=st.pop();
+    for(const [nx,ny] of neigh(cx,cy)){
+      const k=nx+','+ny;
+      if(!seen.has(k) && g[ny][nx]===c){ seen.add(k); st.push([nx,ny]); }
+    }
+  }
+  return seen;
+}
+function liberties(stones,g=grid){
+  const libs=new Set();
+  for(const s of stones){
+    const [x,y]=s.split(',').map(Number);
+    for(const [nx,ny] of neigh(x,y)) if(g[ny][nx]===EMPTY) libs.add(nx+','+ny);
+  }
+  return libs;
+}
+function cloneGrid(g){ return g.map(r => r.slice()); }
+
+function isSuicide(x,y,color,g=grid,koPt=ko){
+  if(g[y][x]!==EMPTY) return true;
+  if(koPt && koPt[0]===x && koPt[1]===y) return true;
+  const t=cloneGrid(g); t[y][x]=color;
+  let cap=0;
+  for(const [nx,ny] of neigh(x,y)){
+    if(t[ny][nx]===opp(color)){
+      const gr=group(nx,ny,t);
+      if(liberties(gr,t).size===0){
+        cap += gr.size;
+        for(const s of gr){ const [a,b]=s.split(',').map(Number); t[b][a]=EMPTY; }
+      }
+    }
+  }
+  return cap===0 && liberties(group(x,y,t),t).size===0;
+}
+
+function snapshot(){
+  return {
+    grid: cloneGrid(grid),
+    ko: ko ? ko.slice() : null,
+    captures: {1:captures[1], 2:captures[2]},
+    lastMove: lastMove ? lastMove.slice() : null,
+    lastWasPass, toPlay, passes, moveCount, gameOver, lastNote,
+    playedCoords: playedCoords.slice()
+  };
+}
+function restore(s){
+  grid = cloneGrid(s.grid);
+  ko = s.ko ? s.ko.slice() : null;
+  captures = {1:s.captures[1], 2:s.captures[2]};
+  lastMove = s.lastMove ? s.lastMove.slice() : null;
+  lastWasPass = !!s.lastWasPass;
+  toPlay = s.toPlay; passes = s.passes; moveCount = s.moveCount;
+  gameOver = s.gameOver; lastNote = s.lastNote || '';
+  playedCoords = (s.playedCoords || []).slice();
+}
+
+function play(x,y,color){
+  if(!inb(x,y) || grid[y][x]!==EMPTY || (ko&&ko[0]===x&&ko[1]===y) || isSuicide(x,y,color)) return false;
+  grid[y][x]=color;
+  let capTotal=0, single=null;
+  for(const [nx,ny] of neigh(x,y)){
+    if(grid[ny][nx]===opp(color)){
+      const gr=group(nx,ny);
+      if(liberties(gr).size===0){
+        capTotal += gr.size;
+        if(gr.size===1) single=[...gr][0];
+        for(const s of gr){ const [a,b]=s.split(',').map(Number); grid[b][a]=EMPTY; }
+      }
+    }
+  }
+  captures[color] += capTotal;
+  ko = null;
+  if(capTotal===1 && single){
+    const own=group(x,y);
+    if(own.size===1 && liberties(own).size===1){
+      const [a,b]=single.split(',').map(Number);
+      ko=[a,b];
+    }
+  }
+  lastMove=[x,y];
+  lastWasPass=false;
+  moveCount++;
+  passes=0;
+  return true;
+}
+
+function doPass(){
+  passes++;
+  lastMove=null;
+  lastWasPass=true;
+  moveCount++;
+  if(passes>=2) gameOver=true;
+}
+
+function legalMoves(color, g=grid, koPt=ko){
+  const m=[];
+  for(let y=0;y<SIZE;y++) for(let x=0;x<SIZE;x++)
+    if(g[y][x]===EMPTY && !isSuicide(x,y,color,g,koPt)) m.push([x,y]);
+  return m;
+}
+
+function starPoints(){
+  const p=[3,9,15], o=[];
+  for(const y of p) for(const x of p) o.push([x,y]);
+  return o;
+}
+
+function listStones(g, color){
+  const o=[];
+  for(let y=0;y<SIZE;y++) for(let x=0;x<SIZE;x++) if(g[y][x]===color) o.push([x,y]);
+  return o;
+}
+
+function influenceScore(x,y,color,g){
+  let mine=0, theirs=0;
+  const oc=opp(color);
+  for(let dy=-4; dy<=4; dy++){
+    for(let dx=-4; dx<=4; dx++){
+      if(!dx && !dy) continue;
+      const nx=x+dx, ny=y+dy;
+      if(!inb(nx,ny)) continue;
+      const d=Math.abs(dx)+Math.abs(dy);
+      if(d>5) continue;
+      const v=g[ny][nx];
+      const w=1/(d*d);
+      if(v===EMPTY){
+        let nearOwn=0, nearOpp=0;
+        for(const [ax,ay] of neigh(nx,ny)){
+          if(g[ay][ax]===color) nearOwn++;
+          else if(g[ay][ax]===oc) nearOpp++;
+        }
+        mine += w * (0.4 + nearOwn*0.5 - nearOpp*0.35);
+      } else if(v===color) mine += w*0.8;
+      else theirs += w*0.9;
+    }
+  }
+  return mine*2.2 - theirs*1.6;
+}
+
+function countGroupsTouching(x,y,color,g){
+  const seen=new Set();
+  let n=0;
+  for(const [nx,ny] of neigh(x,y)){
+    if(g[ny][nx]!==color) continue;
+    const key=[...group(nx,ny,g)].sort().join('|');
+    if(!seen.has(key)){ seen.add(key); n++; }
+  }
+  return n;
+}
+
+function isEyeFill(x,y,color,g){
+  let ownOrEdge=0, emp=0, oppN=0;
+  for(const [nx,ny] of neigh(x,y)){
+    const v=g[ny][nx];
+    if(v===color) ownOrEdge++;
+    else if(v===EMPTY) emp++;
+    else oppN++;
+  }
+  // off-board sides count as "wall"
+  const sides = 4 - neigh(x,y).length;
+  ownOrEdge += sides;
+  return oppN===0 && emp<=1 && ownOrEdge>=3;
+}
+
+function scoreMove(x,y,color,level,g=grid,mc=moveCount, ownStones=null, oppStones=null){
+  let s = Math.random() * (level===1 ? 2.5 : level===2 ? 0.6 : 0.18);
+  const oc = opp(color);
+  const t = cloneGrid(g);
+  t[y][x]=color;
+
+  let cap=0, atari=0, ownN=0, empN=0, oppN=0;
+  for(const [nx,ny] of neigh(x,y)){
+    const v=g[ny][nx];
+    if(v===EMPTY) empN++;
+    else if(v===color) ownN++;
+    else oppN++;
+  }
+
+  for(const [nx,ny] of neigh(x,y)){
+    if(t[ny][nx]===oc){
+      const gr=group(nx,ny,t);
+      const L=liberties(gr,t).size;
+      if(L===0){
+        cap += gr.size;
+        for(const s2 of gr){ const [a,b]=s2.split(',').map(Number); t[b][a]=EMPTY; }
+      } else if(L===1) atari += gr.size;
+    }
+  }
+
+  let saved=0;
+  for(const [nx,ny] of neigh(x,y)){
+    if(g[ny][nx]===color){
+      const gr=group(nx,ny,g);
+      const L=liberties(gr,g).size;
+      if(L===1) saved += gr.size;
+      else if(L===2) s += 8;
+    }
+  }
+
+  s += cap*110 + atari*22 + saved*70;
+
+  const ownAfter=group(x,y,t);
+  const libsAfter=liberties(ownAfter,t).size;
+  if(cap===0){
+    if(libsAfter<=1) s -= 90;
+    else if(libsAfter===2) s -= 28;
+    else if(libsAfter===3) s -= 4;
+    else s += Math.min(libsAfter, 6)*1.5;
+  }
+
+  if(isEyeFill(x,y,color,g) && cap===0) s -= 140;
+  if(ownN>=3 && empN<=1 && cap===0) s -= 85;
+  if(ownN===4 && cap===0) s -= 130;
+  if(ownN>=2 && empN===0 && cap===0) s -= 70;
+
+  const touchGroups = countGroupsTouching(x,y,color,g);
+  if(touchGroups>=2) s += 18 + touchGroups*6;
+  if(oppN>=2 && empN>=1) s += 12;
+
+  s += influenceScore(x,y,color,g);
+
+  const edge = Math.min(x, y, SIZE-1-x, SIZE-1-y);
+  const ownList = ownStones || listStones(g, color);
+  const oppList = oppStones || listStones(g, oc);
+
+  if(mc < 60){
+    if(edge===2 || edge===3) s += 14;
+    else if(edge===4) s += 6;
+    else if(edge===0 || edge===1){
+      if(cap || atari || saved) s += 4;
+      else s -= 18;
+    }
+    if(edge >= 6) s -= 12;
+    for(const [sx,sy] of starPoints()){
+      const dd=Math.abs(sx-x)+Math.abs(sy-y);
+      if(dd===0) s+=18; else if(dd===1) s+=7; else if(dd===2) s+=3;
+    }
+    for(const [sx,sy] of [[2,2],[2,16],[16,2],[16,16],[3,3],[3,15],[15,3],[15,15]]){
+      if(x===sx && y===sy) s+=12;
+    }
+    for(const [sx,sy] of ownList){
+      const dx=Math.abs(sx-x), dy=Math.abs(sy-y);
+      if((dx===1&&dy===2)||(dx===2&&dy===1)) s+=5;
+      if((dx===0&&dy===2)||(dx===2&&dy===0)) s+=4;
+      if(dx===1&&dy===1) s+=2.5;
+      if((dx===0&&dy===3)||(dx===3&&dy===0)) s+=2;
+    }
+    for(const [sx,sy] of oppList){
+      const dx=Math.abs(sx-x), dy=Math.abs(sy-y);
+      if((dx===1&&dy===2)||(dx===2&&dy===1)) s+=4;
+      if((dx===0&&dy===2)||(dx===2&&dy===0)) s+=3;
+    }
+  } else if(mc < 200){
+    let nearOpp=0, nearOwn=0;
+    for(let dy=-3;dy<=3;dy++) for(let dx=-3;dx<=3;dx++){
+      const nx=x+dx, ny=y+dy;
+      if(!inb(nx,ny)||(!dx&&!dy)) continue;
+      const d=Math.abs(dx)+Math.abs(dy); if(d>4) continue;
+      const v=g[ny][nx];
+      if(v===oc) nearOpp += 3/d;
+      else if(v===color) nearOwn += 1.2/d;
+    }
+    s += nearOpp*1.4 + nearOwn*0.5;
+    if(edge===0 && !(cap||atari||saved)) s -= 8;
+  } else {
+    if(empN>=2 && ownN<=2) s += 6;
+    if(isEyeFill(x,y,color,g) && cap===0) s -= 50;
+    if(edge<=1 && (cap||atari)) s += 10;
+    if(oppN>=1 && ownN>=1 && empN>=1) s += 8;
+  }
+
+  if(level>=3){
+    s += cap*20 + atari*8 + saved*15;
+    if(ownN>=3 && cap===0) s -= 15;
+  }
+  if(level>=4){
+    s += influenceScore(x,y,color,g)*0.35;
+    if(touchGroups>=2) s += 8;
+  }
+  return s;
+}
+
+function simulatePlay(g, koPt, x, y, color){
+  const t=cloneGrid(g);
+  t[y][x]=color;
+  let capTotal=0, single=null;
+  for(const [nx,ny] of neigh(x,y)){
+    if(t[ny][nx]===opp(color)){
+      const gr=group(nx,ny,t);
+      if(liberties(gr,t).size===0){
+        capTotal += gr.size;
+        if(gr.size===1) single=[...gr][0];
+        for(const s of gr){ const [a,b]=s.split(',').map(Number); t[b][a]=EMPTY; }
+      }
+    }
+  }
+  let newKo=null;
+  if(capTotal===1 && single){
+    const own=group(x,y,t);
+    if(own.size===1 && liberties(own,t).size===1){
+      const [a,b]=single.split(',').map(Number);
+      newKo=[a,b];
+    }
+  }
+  return {g:t, ko:newKo, cap:capTotal};
+}
+
+function pickCandidates(color, level){
+  let moves = legalMoves(color);
+  if(!moves.length) return [];
+  const caps = level===1 ? 80 : level===2 ? 160 : level===3 ? 280 : 380;
+  const near=[], far=[];
+  for(const m of moves){
+    let n=false;
+    const rad = moveCount<50 ? 4 : 3;
+    for(let dy=-rad;dy<=rad&&!n;dy++) for(let dx=-rad;dx<=rad;dx++){
+      const x=m[0]+dx, y=m[1]+dy;
+      if(inb(x,y) && grid[y][x]) n=true;
+    }
+    if(moveCount<40){
+      const edge=Math.min(m[0],m[1],SIZE-1-m[0],SIZE-1-m[1]);
+      if(edge>=2 && edge<=4) n=true;
+    }
+    (n?near:far).push(m);
+  }
+  let pool = moveCount<45 ? far.concat(near) : (near.length ? near.concat(far.slice(0,50)) : moves);
+
+  if(pool.length > caps){
+    const scored = pool.map(([x,y]) => {
+      let quick = Math.random()*0.3;
+      for(const [nx,ny] of neigh(x,y)){
+        if(grid[ny][nx]===opp(color)) quick+=3;
+        if(grid[ny][nx]===color) quick+=1;
+      }
+      const edge=Math.min(x,y,SIZE-1-x,SIZE-1-y);
+      if(moveCount<60 && (edge===2||edge===3)) quick+=5;
+      return {x,y,quick};
+    });
+    scored.sort((a,b)=>b.quick-a.quick);
+    const keepN = Math.floor(caps*0.7);
+    const keep = scored.slice(0, keepN);
+    const rest = scored.slice(keepN);
+    for(let i=rest.length-1;i>0;i--){ const j=(Math.random()*(i+1))|0; [rest[i],rest[j]]=[rest[j],rest[i]]; }
+    pool = keep.concat(rest.slice(0, caps-keep.length)).map(p=>[p.x,p.y]);
+  }
+  return pool;
+}
+
+function thinkMove(color, level){
+  const moves = pickCandidates(color, level);
+  if(!moves.length) return null;
+  const ownStones = listStones(grid, color);
+  const oppStones = listStones(grid, opp(color));
+
+  let best=null, bestS=-1e9;
+  const scored=[];
+  for(const [x,y] of moves){
+    const sc = scoreMove(x,y,color,level,grid,moveCount,ownStones,oppStones);
+    scored.push({x,y,sc});
+    if(sc>bestS){ bestS=sc; best=[x,y]; }
+  }
+
+  if(level>=4 && scored.length){
+    scored.sort((a,b)=>b.sc-a.sc);
+    const topN = Math.min(25, scored.length);
+    const t0 = performance.now();
+    const TIME_CAP = 180;
+    bestS=-1e9; best=null;
+    for(let i=0;i<topN;i++){
+      if(performance.now()-t0 > TIME_CAP) break;
+      const {x,y,sc:mySc} = scored[i];
+      const sim = simulatePlay(grid, ko, x, y, color);
+      const oppMoves=[];
+      for(let yy=0;yy<SIZE;yy++) for(let xx=0;xx<SIZE;xx++){
+        if(sim.g[yy][xx]!==EMPTY) continue;
+        const near = Math.abs(xx-x)+Math.abs(yy-y) <= 4;
+        let any=near;
+        if(!any){
+          for(let dy=-2;dy<=2&&!any;dy++) for(let dx=-2;dx<=2;dx++){
+            const ax=xx+dx,ay=yy+dy;
+            if(inb(ax,ay)&&sim.g[ay][ax]) any=true;
+          }
+        }
+        if(!any && moveCount>80) continue;
+        if(isSuicide(xx,yy,opp(color),sim.g,sim.ko)) continue;
+        oppMoves.push([xx,yy]);
+      }
+      let oppPool=oppMoves;
+      if(oppPool.length>60){
+        for(let i2=oppPool.length-1;i2>0;i2--){ const j=(Math.random()*(i2+1))|0; [oppPool[i2],oppPool[j]]=[oppPool[j],oppPool[i2]]; }
+        oppPool=oppPool.slice(0,60);
+      }
+      const oOwn=listStones(sim.g, opp(color));
+      const oOpp=listStones(sim.g, color);
+      let oppBest=-1e9;
+      for(const [ox,oy] of oppPool){
+        const osc=scoreMove(ox,oy,opp(color),3,sim.g,moveCount+1,oOwn,oOpp);
+        if(osc>oppBest) oppBest=osc;
+      }
+      if(oppPool.length===0) oppBest=0;
+      const net = mySc - 0.85*oppBest;
+      if(net>bestS){ bestS=net; best=[x,y]; }
+    }
+  } else if(level===1 && scored.length>1){
+    scored.sort((a,b)=>b.sc-a.sc);
+    const pick = scored[Math.min(scored.length-1, (Math.random()*3)|0)];
+    best=[pick.x,pick.y]; bestS=pick.sc;
+  }
+
+  if(bestS < -40 && moveCount>40) return null;
+  return best;
+}
+
+function tryBookForBlackAI(){
+  if(humanColor !== WHITE) return null;
+  if(toPlay !== BLACK) return null;
+  const n = playedCoords.length;
+  const cands=[];
+  for(const b of BOOKS){
+    if(b.moves.length <= n) continue;
+    let ok=true;
+    for(let i=0;i<n;i++){
+      if(b.moves[i].toUpperCase() !== playedCoords[i].toUpperCase()){ ok=false; break; }
+    }
+    if(!ok) continue;
+    if(n % 2 !== 0) continue;
+    const next=parseCoord(b.moves[n]);
+    if(next && grid[next[1]][next[0]]===EMPTY && !isSuicide(next[0],next[1],BLACK)){
+      cands.push({b, next, mv:b.moves[n]});
+    }
+  }
+  if(!cands.length) return null;
+  return cands[(Math.random()*cands.length)|0];
+}
+
+function draw(){
+  const W=canvas.width, pad=W*0.06, span=W-pad*2, gap=span/(SIZE-1);
+  ctx.clearRect(0,0,W,W);
+  const g=ctx.createLinearGradient(0,0,W,W);
+  g.addColorStop(0,'#e0b887'); g.addColorStop(1,'#c48a4a');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,W);
+  ctx.strokeStyle='#3d2914'; ctx.lineWidth=1.2;
+  for(let i=0;i<SIZE;i++){
+    const p=pad+i*gap;
+    ctx.beginPath(); ctx.moveTo(pad,p); ctx.lineTo(pad+span,p); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p,pad); ctx.lineTo(p,pad+span); ctx.stroke();
+  }
+  ctx.fillStyle='#2a1a0a';
+  for(const [x,y] of starPoints()){
+    ctx.beginPath(); ctx.arc(pad+x*gap, pad+y*gap, gap*0.12, 0, Math.PI*2); ctx.fill();
+  }
+  for(let y=0;y<SIZE;y++) for(let x=0;x<SIZE;x++){
+    const c=grid[y][x]; if(!c) continue;
+    const cx=pad+x*gap, cy=pad+y*gap, r=gap*0.46;
+    const rg=ctx.createRadialGradient(cx-r*0.3,cy-r*0.3,r*0.1,cx,cy,r);
+    if(c===BLACK){ rg.addColorStop(0,'#555'); rg.addColorStop(1,'#0a0a0a'); }
+    else { rg.addColorStop(0,'#fff'); rg.addColorStop(1,'#d0d0d0'); }
+    ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fillStyle=rg; ctx.fill();
+  }
+  if(lastMove){
+    const [x,y]=lastMove;
+    ctx.beginPath();
+    ctx.arc(pad+x*gap, pad+y*gap, gap*0.14, 0, Math.PI*2);
+    ctx.fillStyle = grid[y][x]===BLACK ? '#fff' : '#111';
+    ctx.fill();
+  }
+  if(ko){
+    const [x,y]=ko;
+    ctx.strokeStyle='#c00'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(pad+x*gap, pad+y*gap, gap*0.2, 0, Math.PI*2); ctx.stroke();
+  }
+}
+
+function updateLastMoveDisplay(who, xy, isPass){
+  if(isPass){
+    lastMoveBig.textContent = colorName(who) + ' 停一手';
+    lastMoveBig.className = who===BLACK ? 'black' : 'white';
+    lastMoveLabel.textContent = '上一手';
+    return;
+  }
+  if(!xy || who==null){
+    lastMoveBig.textContent = '—';
+    lastMoveBig.className = '';
+    lastMoveLabel.textContent = '上一手（同步到 App）';
+    return;
+  }
+  const c = coord(xy[0], xy[1]);
+  lastMoveBig.textContent = colorName(who) + ' ' + c;
+  lastMoveBig.className = who===BLACK ? 'black' : 'white';
+  lastMoveLabel.textContent = (who === opp(humanColor))
+    ? 'AI 一手 → 請轉到 App'
+    : '你的一手（已同步 App？）';
+}
+
+function refreshLastFromState(){
+  if(lastWasPass){
+    // who passed = opposite of current toPlay (the one who just acted)
+    const who = opp(toPlay);
+    // after pass, toPlay already flipped — yes who just passed is opp(toPlay)
+    // but on fresh board moveCount 0: no
+    if(moveCount===0){ updateLastMoveDisplay(null,null,false); return; }
+    updateLastMoveDisplay(who, null, true);
+  } else if(lastMove){
+    updateLastMoveDisplay(grid[lastMove[1]][lastMove[0]], lastMove, false);
+  } else {
+    updateLastMoveDisplay(null,null,false);
+  }
+}
+
+function updateStatus(extra){
+  const lv = +document.getElementById('aiLevel').value;
+  const lvNames = {1:'弱',2:'中',3:'強',4:'超強'};
+  if(gameOver){
+    statusEl.textContent = '終局（雙方停一手）。提子 黑'+captures[1]+' 白'+captures[2]+' · 共 '+moveCount+' 手\n強度 '+lvNames[lv];
+    return;
+  }
+  const turn = toPlay===humanColor ? '輪到你（'+colorName(humanColor)+'）' : '輪到 AI（'+colorName(toPlay)+'）';
+  let line = turn+'　第'+(moveCount+1)+'手　提子 黑'+captures[1]+' 白'+captures[2]+'　強度 '+lvNames[lv];
+  if(aiThinking) line += '\nAI 思考中…';
+  else if(extra) line += '\n'+extra;
+  else if(lastNote) line += '\n'+lastNote;
+  statusEl.textContent = line;
+  if(aiThinking) statusEl.innerHTML = line.replace('AI 思考中…', '<span class="thinking">AI 思考中…</span>');
+}
+
+function setButtons(){
+  const busy = aiThinking || gameOver;
+  document.getElementById('pass').disabled = busy || toPlay!==humanColor;
+  document.getElementById('undo').disabled = aiThinking || history.length===0;
+  document.getElementById('forceAI').disabled = busy || toPlay===humanColor;
+  document.getElementById('myColor').disabled = moveCount>0 || aiThinking;
+}
+
+function cancelAI(){
+  if(aiTimer){ clearTimeout(aiTimer); aiTimer=null; }
+  aiThinking=false;
+}
+
+function fresh(){
+  cancelAI();
+  humanColor = +document.getElementById('myColor').value;
+  grid = Array.from({length:SIZE}, ()=>Array(SIZE).fill(EMPTY));
+  ko=null; captures={1:0,2:0}; lastMove=null; lastWasPass=false; toPlay=BLACK;
+  passes=0; moveCount=0; gameOver=false; history=[];
+  playedCoords=[]; lastNote='';
+  updateLastMoveDisplay(null,null,false);
+  draw();
+  if(humanColor===WHITE){
+    lastNote = '你執白；AI（黑）先下。';
+    updateStatus(lastNote);
+    setButtons();
+    scheduleAI(350);
+  } else {
+    lastNote = '你執黑；請在棋盤落子（同步 App）。';
+    updateStatus(lastNote);
+    setButtons();
+  }
+}
+
+function scheduleAI(delay){
+  if(gameOver || toPlay===humanColor) return;
+  cancelAI();
+  aiThinking=true; setButtons(); updateStatus();
+  aiTimer = setTimeout(() => {
+    aiTimer=null;
+    try { aiPlay(); }
+    finally { aiThinking=false; setButtons(); updateStatus(lastNote); }
+  }, delay || 300);
+}
+
+function aiPlay(){
+  if(gameOver || toPlay===humanColor) return;
+  const level = +document.getElementById('aiLevel').value;
+  const color = toPlay;
+
+  history.push(snapshot());
+
+  let mv=null;
+  const book = tryBookForBlackAI();
+  if(book && moveCount < 24 && level >= 2){
+    mv = book.next;
+    lastNote = 'AI 參考定石「'+book.b.name+'」→ '+book.mv;
+  } else {
+    mv = thinkMove(color, level);
+    if(mv) lastNote = 'AI 思考落子 → '+coord(mv[0],mv[1]);
+    else lastNote = 'AI 選擇停一手';
+  }
+
+  if(!mv){
+    doPass();
+    updateLastMoveDisplay(color, null, true);
+    toPlay = opp(toPlay);
+    draw();
+    return;
+  }
+
+  if(!play(mv[0], mv[1], color)){
+    doPass();
+    updateLastMoveDisplay(color, null, true);
+  } else {
+    playedCoords.push(coord(mv[0], mv[1]));
+    updateLastMoveDisplay(color, mv, false);
+  }
+  toPlay = opp(toPlay);
+  draw();
+}
+
+function humanPlayAt(x,y){
+  if(aiThinking || gameOver || toPlay!==humanColor) return;
+  if(!inb(x,y) || grid[y][x]!==EMPTY) return;
+  if(isSuicide(x,y,humanColor)){
+    lastNote='非法：自殺或劫爭禁著';
+    updateStatus(lastNote);
+    return;
+  }
+  history.push(snapshot());
+  if(!play(x,y,humanColor)){
+    history.pop();
+    lastNote='無法落子';
+    updateStatus(lastNote);
+    return;
+  }
+  playedCoords.push(coord(x,y));
+  lastNote = '你 → '+coord(x,y);
+  updateLastMoveDisplay(humanColor, [x,y], false);
+  toPlay = opp(toPlay);
+  draw(); updateStatus(lastNote); setButtons();
+  if(!gameOver) scheduleAI(280 + Math.random()*120);
+}
+
+function humanPass(){
+  if(aiThinking || gameOver || toPlay!==humanColor) return;
+  history.push(snapshot());
+  doPass();
+  lastNote = '你停一手';
+  updateLastMoveDisplay(humanColor, null, true);
+  toPlay = opp(toPlay);
+  draw(); updateStatus(lastNote); setButtons();
+  if(!gameOver) scheduleAI(300);
+}
+
+function undo(){
+  if(aiThinking || !history.length) return;
+  cancelAI();
+  restore(history.pop());
+  // Also undo AI reply so human can re-place: if now AI to play, pop again
+  if(toPlay !== humanColor && history.length && !gameOver){
+    restore(history.pop());
+  }
+  refreshLastFromState();
+  lastNote = '已悔棋';
+  draw(); updateStatus(lastNote); setButtons();
+  if(!gameOver && toPlay!==humanColor) scheduleAI(350);
+}
+
+function canvasPos(e){
+  const rect = canvas.getBoundingClientRect();
+  const clientX = e.clientX, clientY = e.clientY;
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const mx = (clientX - rect.left) * scaleX;
+  const my = (clientY - rect.top) * scaleY;
+  const W=canvas.width, pad=W*0.06, span=W-pad*2, gap=span/(SIZE-1);
+  const x = Math.round((mx - pad) / gap);
+  const y = Math.round((my - pad) / gap);
+  return [x,y];
+}
+
+let ignoreClickUntil=0;
+canvas.addEventListener('click', (e) => {
+  if(Date.now() < ignoreClickUntil) return;
+  const [x,y] = canvasPos(e);
+  humanPlayAt(x,y);
+});
+let touchMoved=false;
+canvas.addEventListener('touchstart', ()=>{ touchMoved=false; }, {passive:true});
+canvas.addEventListener('touchmove', ()=>{ touchMoved=true; }, {passive:true});
+canvas.addEventListener('touchend', (e)=>{
+  if(touchMoved) return;
+  e.preventDefault();
+  ignoreClickUntil = Date.now()+500;
+  const t=e.changedTouches[0];
+  const [x,y]=canvasPos({clientX:t.clientX, clientY:t.clientY});
+  humanPlayAt(x,y);
+}, {passive:false});
+
+document.getElementById('new').onclick = () => fresh();
+document.getElementById('undo').onclick = () => undo();
+document.getElementById('pass').onclick = () => humanPass();
+document.getElementById('forceAI').onclick = () => {
+  if(aiThinking || gameOver || toPlay===humanColor) return;
+  scheduleAI(100);
+};
+document.getElementById('myColor').onchange = () => {
+  if(moveCount===0 && !aiThinking) fresh();
+};
+document.getElementById('aiLevel').onchange = () => updateStatus();
+
+// Expose for tests
+if(typeof window!=='undefined') window.__goTest = {
+  get state(){ return {toPlay, humanColor, moveCount, captures, gameOver, lastMove, playedCoords, aiThinking}; },
+  fresh, humanPlayAt, thinkMove, parseCoord, coord, play, scheduleAI, aiPlay
+};
+
+fresh();
+})();
+</script>
+</body>
+</html>
